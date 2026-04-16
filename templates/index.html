@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Programme Manager | Company Training Portal</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav class="navbar">
+            <div class="nav-brand">
+                <i class="fas fa-calendar-alt"></i>
+                <span>Programme Manager</span>
+            </div>
+            <div class="nav-menu" id="navMenu">
+                <button class="nav-btn" id="adminLoginBtn"><i class="fas fa-user-shield"></i> Admin</button>
+                <button class="nav-btn" id="participantLoginBtn"><i class="fas fa-user-graduate"></i> Participant</button>
+                <div id="userInfo" style="display: none;">
+                    <span id="userNameDisplay"></span>
+                    <button class="logout-btn" id="logoutBtn"><i class="fas fa-sign-out-alt"></i> Logout</button>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div id="loginPanel" class="login-panel">
+                <div class="login-card" id="adminLoginCard">
+                    <div class="login-header">
+                        <i class="fas fa-user-shield"></i>
+                        <h2>Admin Login</h2>
+                    </div>
+                    <input type="text" id="adminUsername" placeholder="Username" class="login-input">
+                    <input type="password" id="adminPassword" placeholder="Password" class="login-input">
+                    <button onclick="adminLogin()" class="login-btn"><i class="fas fa-sign-in-alt"></i> Login</button>
+                </div>
+                <div class="login-card" id="participantLoginCard">
+                    <div class="login-header">
+                        <i class="fas fa-user-graduate"></i>
+                        <h2>Participant Login</h2>
+                    </div>
+                    <input type="text" id="participantPEN" placeholder="PEN Number" class="login-input">
+                    <input type="password" id="participantPassword" placeholder="Password" class="login-input">
+                    <button onclick="participantLogin()" class="login-btn"><i class="fas fa-sign-in-alt"></i> Login</button>
+                </div>
+            </div>
+
+            <!-- Admin Dashboard -->
+            <div id="adminDashboard" style="display: none;">
+                <div class="dashboard-header">
+                    <h1><i class="fas fa-tachometer-alt"></i> Admin Dashboard</h1>
+                    <div class="tab-buttons">
+    <button class="tab-btn active" onclick="showAdminTab('programmes')"><i class="fas fa-chalkboard"></i> Programmes</button>
+    <button class="tab-btn" onclick="showAdminTab('participants')"><i class="fas fa-users"></i> Participants</button>
+    <button class="tab-btn" onclick="openDateWiseReport()"><i class="fas fa-calendar-week"></i> Date-wise Report</button>
+</div>
+                </div>
+
+                <!-- Programmes Tab -->
+                <div id="programmesTab" class="tab-content">
+                    <button class="btn-primary" onclick="openProgrammeModal()"><i class="fas fa-plus"></i> Create Programme</button>
+                    <div class="cards-grid" id="programmesList"></div>
+                </div>
+
+                <!-- Participants Tab -->
+                <div id="participantsTab" class="tab-content" style="display: none;">
+                    <button class="btn-primary" onclick="openParticipantModal()"><i class="fas fa-user-plus"></i> Add Participant</button>
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>PEN Number</th><th>Name</th><th>Designation</th><th>District</th><th>Actions</th></tr>
+                            </thead>
+                            <tbody id="participantsList"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Participant Dashboard -->
+            <div id="participantDashboard" style="display: none;">
+                <div class="dashboard-header">
+                    <h1><i class="fas fa-clipboard-list"></i> My Programmes</h1>
+                    <p>Welcome, <strong id="welcomeName"></strong>! Please confirm your participation for each programme.</p>
+                </div>
+                <div class="cards-grid" id="participantProgrammesList"></div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Programme Modal -->
+    <div id="programmeModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeProgrammeModal()">&times;</span>
+            <h2 id="programmeModalTitle">Create Programme</h2>
+            <input type="hidden" id="programmeId">
+            <input type="text" id="progName" placeholder="Programme Name" class="modal-input">
+            <textarea id="progDesc" placeholder="Description" class="modal-input" rows="3"></textarea>
+            <input type="number" id="progDays" placeholder="Number of Days" class="modal-input">
+            <input type="date" id="progFromDate" class="modal-input">
+            <input type="date" id="progToDate" class="modal-input">
+            <button onclick="saveProgramme()" class="btn-primary">Save Programme</button>
+        </div>
+    </div>
+
+    <!-- Participant Modal -->
+    <div id="participantModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeParticipantModal()">&times;</span>
+            <h2 id="participantModalTitle">Add Participant</h2>
+            <input type="hidden" id="participantPenOrig">
+            <input type="text" id="participantPen" placeholder="PEN Number" class="modal-input">
+            <input type="text" id="participantName" placeholder="Full Name" class="modal-input">
+            <input type="text" id="participantDesignation" placeholder="Designation" class="modal-input">
+            <input type="text" id="participantDistrict" placeholder="District" class="modal-input">
+            <input type="password" id="participantPass" placeholder="Password" class="modal-input">
+            <button onclick="saveParticipant()" class="btn-primary">Save Participant</button>
+        </div>
+    </div>
+
+    <!-- Enroll Modal -->
+    <div id="enrollModal" class="modal">
+        <div class="modal-content modal-large">
+            <span class="close" onclick="closeEnrollModal()">&times;</span>
+            <h2>Enroll Participants to <span id="enrollProgName"></span></h2>
+            <div class="search-box">
+                <input type="text" id="participantSearch" placeholder="Search participants..." class="modal-input">
+            </div>
+            <div id="participantsChecklist" class="checklist"></div>
+            <button onclick="saveEnrollment()" class="btn-primary">Enroll Selected</button>
+        </div>
+    </div>
+
+    <!-- Response Modal -->
+    <div id="responseModal" class="modal">
+        <div class="modal-content modal-large">
+            <span class="close" onclick="closeResponseModal()">&times;</span>
+            <h2 id="responseProgName"></h2>
+            <input type="hidden" id="responseProgId">
+            
+            <div class="form-group">
+                <label>Do you confirm participation?</label>
+                <select id="responseWillingness" class="modal-input">
+                    <option value="">Select...</option>
+                    <option value="Yes">Yes, I will participate</option>
+                    <option value="No">No, I cannot participate</option>
+                </select>
+            </div>
+
+            <div id="attendanceSection" style="display: none;">
+                <label>Which days will you attend?</label>
+                <div id="attendanceDaysChecklist" class="checklist"></div>
+                
+                <label>Approximate arrival date & time:</label>
+                <input type="date" id="arrivalDate" class="modal-input">
+                <input type="time" id="arrivalTime" class="modal-input">
+                
+                <label>Food Preference:</label>
+                // Replace the food preference select options with:
+<select id="foodPreference" class="modal-input">
+    <option value="Vegetarian">🥬 Vegetarian</option>
+    <option value="Non-Vegetarian">🍗 Non-Vegetarian</option>
+</select>
+                
+                
+                <label>Remarks:</label>
+                <textarea id="responseRemarks" class="modal-input" rows="2" placeholder="Any special requirements..."></textarea>
+            </div>
+            
+            <button onclick="saveResponse()" class="btn-primary">Save Response</button>
+        </div>
+    </div>
+
+    <!-- Programme Participants Modal -->
+    <div id="programmeParticipantsModal" class="modal">
+        <div class="modal-content modal-xlarge">
+            <span class="close" onclick="closeProgrammeParticipantsModal()">&times;</span>
+            <h2 id="ppProgName"></h2>
+            <div class="action-bar">
+    <button onclick="printParticipantList()" class="btn-secondary"><i class="fas fa-print"></i> Print List</button>
+    <button onclick="generateCateringReport()" class="btn-secondary"><i class="fas fa-utensils"></i> Catering Report</button>
+    <button onclick="openEnrollModalForCurrent()" class="btn-primary"><i class="fas fa-user-plus"></i> Add Participants</button>
+</div>
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>PEN</th><th>Name</th><th>Designation</th><th>District</th>
+                            <th>Willingness</th><th>Attendance Days</th><th>Arrival</th>
+                            <th>Food</th><th>Remarks</th><th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="programmeParticipantsList"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
