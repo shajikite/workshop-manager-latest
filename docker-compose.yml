@@ -5,7 +5,7 @@ services:
     build: .
     container_name: programme-manager
     ports:
-      - "8080:8080"  # Add this line - maps host port 8080 to container port 8080
+      - "8080:8080"
     volumes:
       - ./data:/app/data
       - ./programme_manager.db:/app/programme_manager.db
@@ -13,4 +13,5 @@ services:
       - FLASK_ENV=development
       - PORT=8080
       - PYTHONUNBUFFERED=1
+      # DATABASE_URL is NOT set here for local SQLite
     restart: unless-stopped

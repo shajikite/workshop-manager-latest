@@ -1,6 +1,4 @@
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import hashlib
 import json
 import os
@@ -11,108 +9,185 @@ from contextlib import contextmanager
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
 
-# Database configuration from environment variable
+# Database configuration
 DATABASE_URL = os.environ.get('DATABASE_URL')
+
+def parse_date(date_value):
+    """Parse date from either string or date object"""
+    if isinstance(date_value, str):
+        return datetime.strptime(date_value, '%Y-%m-%d')
+    elif hasattr(date_value, 'strftime'):
+        # It's already a date/datetime object
+        return date_value
+    else:
+        return datetime.strptime(str(date_value), '%Y-%m-%d')
 
 @contextmanager
 def get_db():
-    """Get database connection with context manager for automatic cleanup"""
-    if not DATABASE_URL:
-        raise Exception("DATABASE_URL environment variable not set")
-    
-    conn = psycopg2.connect(DATABASE_URL)
-    conn.cursor_factory = RealDictCursor
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    """Get database connection - works with both SQLite and PostgreSQL"""
+    if DATABASE_URL:
+        # PostgreSQL mode (for Render.com)
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.cursor_factory = RealDictCursor
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    else:
+        # SQLite mode (for local development)
+        import sqlite3
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        DATABASE_PATH = os.path.join(BASE_DIR, 'programme_manager.db')
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 def init_db():
-    """Initialize database with all tables"""
+    """Initialize database tables for both SQLite and PostgreSQL"""
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Admin table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS admin (
-                id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
-            )
-        ''')
+        if DATABASE_URL:
+            # PostgreSQL syntax
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS admin (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS participant (
+                    pen_number TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    designation TEXT,
+                    district TEXT,
+                    password TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS programme (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    number_of_days INTEGER,
+                    from_date DATE,
+                    to_date DATE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS programme_participant (
+                    programme_id INTEGER REFERENCES programme(id) ON DELETE CASCADE,
+                    pen_number TEXT REFERENCES participant(pen_number) ON DELETE CASCADE,
+                    enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (programme_id, pen_number)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS participant_response (
+                    id SERIAL PRIMARY KEY,
+                    programme_id INTEGER REFERENCES programme(id) ON DELETE CASCADE,
+                    pen_number TEXT REFERENCES participant(pen_number) ON DELETE CASCADE,
+                    willingness TEXT,
+                    attendance_days TEXT,
+                    arrival_date DATE,
+                    arrival_time TEXT,
+                    food_preference TEXT,
+                    remarks TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(programme_id, pen_number)
+                )
+            ''')
+        else:
+            # SQLite syntax
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS admin (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS participant (
+                    pen_number TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    designation TEXT,
+                    district TEXT,
+                    password TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS programme (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    number_of_days INTEGER,
+                    from_date DATE,
+                    to_date DATE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS programme_participant (
+                    programme_id INTEGER,
+                    pen_number TEXT,
+                    enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (programme_id) REFERENCES programme(id),
+                    FOREIGN KEY (pen_number) REFERENCES participant(pen_number),
+                    PRIMARY KEY (programme_id, pen_number)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS participant_response (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    programme_id INTEGER,
+                    pen_number TEXT,
+                    willingness TEXT,
+                    attendance_days TEXT,
+                    arrival_date DATE,
+                    arrival_time TEXT,
+                    food_preference TEXT,
+                    remarks TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (programme_id) REFERENCES programme(id),
+                    FOREIGN KEY (pen_number) REFERENCES participant(pen_number),
+                    UNIQUE(programme_id, pen_number)
+                )
+            ''')
         
-        # Participant table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS participant (
-                pen_number TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                designation TEXT,
-                district TEXT,
-                password TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        # Insert default admin (works for both)
+        if DATABASE_URL:
+            cursor.execute("SELECT * FROM admin WHERE username = %s", ('admin',))
+        else:
+            cursor.execute("SELECT * FROM admin WHERE username = ?", ('admin',))
         
-        # Programme table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS programme (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                number_of_days INTEGER,
-                from_date DATE,
-                to_date DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Programme Participants (enrollment)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS programme_participant (
-                programme_id INTEGER REFERENCES programme(id) ON DELETE CASCADE,
-                pen_number TEXT REFERENCES participant(pen_number) ON DELETE CASCADE,
-                enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (programme_id, pen_number)
-            )
-        ''')
-        
-        # Participant response for programme
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS participant_response (
-                id SERIAL PRIMARY KEY,
-                programme_id INTEGER REFERENCES programme(id) ON DELETE CASCADE,
-                pen_number TEXT REFERENCES participant(pen_number) ON DELETE CASCADE,
-                willingness TEXT,
-                attendance_days TEXT,
-                arrival_date DATE,
-                arrival_time TEXT,
-                food_preference TEXT,
-                remarks TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(programme_id, pen_number)
-            )
-        ''')
-        
-        # Insert default admin if not exists
-        cursor.execute("SELECT * FROM admin WHERE username = 'admin'")
         if not cursor.fetchone():
             hashed = hashlib.sha256('admin123'.encode()).hexdigest()
-            cursor.execute(
-                "INSERT INTO admin (username, password) VALUES (%s, %s)",
-                ('admin', hashed)
-            )
+            if DATABASE_URL:
+                cursor.execute("INSERT INTO admin (username, password) VALUES (%s, %s)", ('admin', hashed))
+            else:
+                cursor.execute("INSERT INTO admin (username, password) VALUES (?, ?)", ('admin', hashed))
         
         print("Database initialized successfully!")
 
-# Initialize database if DATABASE_URL is set
-if DATABASE_URL:
-    init_db()
-else:
-    print("Warning: DATABASE_URL not set. Running without database!")
+# Initialize database on startup
+init_db()
 
 # Authentication decorators
 def admin_login_required(f):
@@ -138,7 +213,7 @@ def index():
 
 @app.route('/health')
 def health_check():
-    return jsonify({'status': 'healthy', 'database': 'connected'}), 200
+    return jsonify({'status': 'healthy'}), 200
 
 @app.route('/admin/login', methods=['POST'])
 def admin_login():
@@ -148,10 +223,10 @@ def admin_login():
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM admin WHERE username = %s AND password = %s",
-            (username, password)
-        )
+        if DATABASE_URL:
+            cursor.execute("SELECT * FROM admin WHERE username = %s AND password = %s", (username, password))
+        else:
+            cursor.execute("SELECT * FROM admin WHERE username = ? AND password = ?", (username, password))
         admin = cursor.fetchone()
     
     if admin:
@@ -174,10 +249,10 @@ def participant_login():
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM participant WHERE pen_number = %s AND password = %s",
-            (pen_number, password)
-        )
+        if DATABASE_URL:
+            cursor.execute("SELECT * FROM participant WHERE pen_number = %s AND password = %s", (pen_number, password))
+        else:
+            cursor.execute("SELECT * FROM participant WHERE pen_number = ? AND password = ?", (pen_number, password))
         participant = cursor.fetchone()
     
     if participant:
@@ -209,19 +284,35 @@ def get_programmes():
         cursor = conn.cursor()
         if session.get('participant_logged_in'):
             pen = session['participant_pen']
-            cursor.execute('''
-                SELECT p.*, 
-                    1 as is_enrolled,
-                    pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
-                    pr.food_preference, pr.remarks
-                FROM programme p
-                JOIN programme_participant pp ON p.id = pp.programme_id
-                LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = %s
-                WHERE pp.pen_number = %s
-                ORDER BY p.from_date DESC
-            ''', (pen, pen))
+            if DATABASE_URL:
+                cursor.execute('''
+                    SELECT p.*, 
+                        1 as is_enrolled,
+                        pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
+                        pr.food_preference, pr.remarks
+                    FROM programme p
+                    JOIN programme_participant pp ON p.id = pp.programme_id
+                    LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = %s
+                    WHERE pp.pen_number = %s
+                    ORDER BY p.from_date DESC
+                ''', (pen, pen))
+            else:
+                cursor.execute('''
+                    SELECT p.*, 
+                        1 as is_enrolled,
+                        pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
+                        pr.food_preference, pr.remarks
+                    FROM programme p
+                    JOIN programme_participant pp ON p.id = pp.programme_id
+                    LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = ?
+                    WHERE pp.pen_number = ?
+                    ORDER BY p.from_date DESC
+                ''', (pen, pen))
         else:
-            cursor.execute('SELECT * FROM programme ORDER BY from_date DESC')
+            if DATABASE_URL:
+                cursor.execute('SELECT * FROM programme ORDER BY from_date DESC')
+            else:
+                cursor.execute('SELECT * FROM programme ORDER BY from_date DESC')
         
         programmes = cursor.fetchall()
     
@@ -233,12 +324,19 @@ def create_programme():
     data = request.json
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO programme (name, description, number_of_days, from_date, to_date)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (data['name'], data['description'], data['number_of_days'], data['from_date'], data['to_date']))
-        programme_id = cursor.fetchone()['id']
+        if DATABASE_URL:
+            cursor.execute('''
+                INSERT INTO programme (name, description, number_of_days, from_date, to_date)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            ''', (data['name'], data['description'], data['number_of_days'], data['from_date'], data['to_date']))
+            programme_id = cursor.fetchone()['id']
+        else:
+            cursor.execute('''
+                INSERT INTO programme (name, description, number_of_days, from_date, to_date)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (data['name'], data['description'], data['number_of_days'], data['from_date'], data['to_date']))
+            programme_id = cursor.lastrowid
     
     return jsonify({'success': True, 'id': programme_id})
 
@@ -248,11 +346,18 @@ def update_programme(programme_id):
     data = request.json
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE programme 
-            SET name=%s, description=%s, number_of_days=%s, from_date=%s, to_date=%s
-            WHERE id=%s
-        ''', (data['name'], data['description'], data['number_of_days'], data['from_date'], data['to_date'], programme_id))
+        if DATABASE_URL:
+            cursor.execute('''
+                UPDATE programme 
+                SET name=%s, description=%s, number_of_days=%s, from_date=%s, to_date=%s
+                WHERE id=%s
+            ''', (data['name'], data['description'], data['number_of_days'], data['from_date'], data['to_date'], programme_id))
+        else:
+            cursor.execute('''
+                UPDATE programme 
+                SET name=?, description=?, number_of_days=?, from_date=?, to_date=?
+                WHERE id=?
+            ''', (data['name'], data['description'], data['number_of_days'], data['from_date'], data['to_date'], programme_id))
     
     return jsonify({'success': True})
 
@@ -261,9 +366,14 @@ def update_programme(programme_id):
 def delete_programme(programme_id):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM programme_participant WHERE programme_id=%s', (programme_id,))
-        cursor.execute('DELETE FROM participant_response WHERE programme_id=%s', (programme_id,))
-        cursor.execute('DELETE FROM programme WHERE id=%s', (programme_id,))
+        if DATABASE_URL:
+            cursor.execute('DELETE FROM programme_participant WHERE programme_id=%s', (programme_id,))
+            cursor.execute('DELETE FROM participant_response WHERE programme_id=%s', (programme_id,))
+            cursor.execute('DELETE FROM programme WHERE id=%s', (programme_id,))
+        else:
+            cursor.execute('DELETE FROM programme_participant WHERE programme_id=?', (programme_id,))
+            cursor.execute('DELETE FROM participant_response WHERE programme_id=?', (programme_id,))
+            cursor.execute('DELETE FROM programme WHERE id=?', (programme_id,))
     
     return jsonify({'success': True})
 
@@ -273,7 +383,10 @@ def delete_programme(programme_id):
 def get_participants():
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM participant ORDER BY created_at DESC')
+        if DATABASE_URL:
+            cursor.execute('SELECT * FROM participant ORDER BY created_at DESC')
+        else:
+            cursor.execute('SELECT * FROM participant ORDER BY created_at DESC')
         participants = cursor.fetchall()
     
     return jsonify([dict(row) for row in participants])
@@ -287,10 +400,16 @@ def create_participant():
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO participant (pen_number, name, designation, district, password)
-                VALUES (%s, %s, %s, %s, %s)
-            ''', (data['pen_number'], data['name'], data['designation'], data['district'], hashed_password))
+            if DATABASE_URL:
+                cursor.execute('''
+                    INSERT INTO participant (pen_number, name, designation, district, password)
+                    VALUES (%s, %s, %s, %s, %s)
+                ''', (data['pen_number'], data['name'], data['designation'], data['district'], hashed_password))
+            else:
+                cursor.execute('''
+                    INSERT INTO participant (pen_number, name, designation, district, password)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (data['pen_number'], data['name'], data['designation'], data['district'], hashed_password))
         return jsonify({'success': True})
     except Exception:
         return jsonify({'success': False, 'error': 'PEN number already exists'})
@@ -303,13 +422,23 @@ def update_participant(pen_number):
         cursor = conn.cursor()
         if data.get('password'):
             hashed = hashlib.sha256(data['password'].encode()).hexdigest()
-            cursor.execute('''
-                UPDATE participant SET name=%s, designation=%s, district=%s, password=%s WHERE pen_number=%s
-            ''', (data['name'], data['designation'], data['district'], hashed, pen_number))
+            if DATABASE_URL:
+                cursor.execute('''
+                    UPDATE participant SET name=%s, designation=%s, district=%s, password=%s WHERE pen_number=%s
+                ''', (data['name'], data['designation'], data['district'], hashed, pen_number))
+            else:
+                cursor.execute('''
+                    UPDATE participant SET name=?, designation=?, district=?, password=? WHERE pen_number=?
+                ''', (data['name'], data['designation'], data['district'], hashed, pen_number))
         else:
-            cursor.execute('''
-                UPDATE participant SET name=%s, designation=%s, district=%s WHERE pen_number=%s
-            ''', (data['name'], data['designation'], data['district'], pen_number))
+            if DATABASE_URL:
+                cursor.execute('''
+                    UPDATE participant SET name=%s, designation=%s, district=%s WHERE pen_number=%s
+                ''', (data['name'], data['designation'], data['district'], pen_number))
+            else:
+                cursor.execute('''
+                    UPDATE participant SET name=?, designation=?, district=? WHERE pen_number=?
+                ''', (data['name'], data['designation'], data['district'], pen_number))
     
     return jsonify({'success': True})
 
@@ -318,9 +447,14 @@ def update_participant(pen_number):
 def delete_participant(pen_number):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM programme_participant WHERE pen_number=%s', (pen_number,))
-        cursor.execute('DELETE FROM participant_response WHERE pen_number=%s', (pen_number,))
-        cursor.execute('DELETE FROM participant WHERE pen_number=%s', (pen_number,))
+        if DATABASE_URL:
+            cursor.execute('DELETE FROM programme_participant WHERE pen_number=%s', (pen_number,))
+            cursor.execute('DELETE FROM participant_response WHERE pen_number=%s', (pen_number,))
+            cursor.execute('DELETE FROM participant WHERE pen_number=%s', (pen_number,))
+        else:
+            cursor.execute('DELETE FROM programme_participant WHERE pen_number=?', (pen_number,))
+            cursor.execute('DELETE FROM participant_response WHERE pen_number=?', (pen_number,))
+            cursor.execute('DELETE FROM participant WHERE pen_number=?', (pen_number,))
     
     return jsonify({'success': True})
 
@@ -334,10 +468,16 @@ def enroll_participants(programme_id):
     with get_db() as conn:
         cursor = conn.cursor()
         for pen in pen_numbers:
-            cursor.execute('''
-                INSERT INTO programme_participant (programme_id, pen_number) 
-                VALUES (%s, %s) ON CONFLICT DO NOTHING
-            ''', (programme_id, pen))
+            if DATABASE_URL:
+                cursor.execute('''
+                    INSERT INTO programme_participant (programme_id, pen_number) 
+                    VALUES (%s, %s) ON CONFLICT DO NOTHING
+                ''', (programme_id, pen))
+            else:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO programme_participant (programme_id, pen_number) 
+                    VALUES (?, ?)
+                ''', (programme_id, pen))
     
     return jsonify({'success': True})
 
@@ -346,16 +486,28 @@ def enroll_participants(programme_id):
 def get_programme_participants(programme_id):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT p.*, 
-                pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
-                pr.food_preference, pr.remarks, pr.updated_at as response_date
-            FROM participant p
-            JOIN programme_participant pp ON p.pen_number = pp.pen_number
-            LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
-            WHERE pp.programme_id = %s
-            ORDER BY p.name
-        ''', (programme_id,))
+        if DATABASE_URL:
+            cursor.execute('''
+                SELECT p.*, 
+                    pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
+                    pr.food_preference, pr.remarks, pr.updated_at as response_date
+                FROM participant p
+                JOIN programme_participant pp ON p.pen_number = pp.pen_number
+                LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
+                WHERE pp.programme_id = %s
+                ORDER BY p.name
+            ''', (programme_id,))
+        else:
+            cursor.execute('''
+                SELECT p.*, 
+                    pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
+                    pr.food_preference, pr.remarks, pr.updated_at as response_date
+                FROM participant p
+                JOIN programme_participant pp ON p.pen_number = pp.pen_number
+                LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
+                WHERE pp.programme_id = ?
+                ORDER BY p.name
+            ''', (programme_id,))
         participants = cursor.fetchall()
     
     return jsonify([dict(row) for row in participants])
@@ -365,8 +517,12 @@ def get_programme_participants(programme_id):
 def remove_participant(programme_id, pen_number):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM programme_participant WHERE programme_id=%s AND pen_number=%s', (programme_id, pen_number))
-        cursor.execute('DELETE FROM participant_response WHERE programme_id=%s AND pen_number=%s', (programme_id, pen_number))
+        if DATABASE_URL:
+            cursor.execute('DELETE FROM programme_participant WHERE programme_id=%s AND pen_number=%s', (programme_id, pen_number))
+            cursor.execute('DELETE FROM participant_response WHERE programme_id=%s AND pen_number=%s', (programme_id, pen_number))
+        else:
+            cursor.execute('DELETE FROM programme_participant WHERE programme_id=? AND pen_number=?', (programme_id, pen_number))
+            cursor.execute('DELETE FROM participant_response WHERE programme_id=? AND pen_number=?', (programme_id, pen_number))
     
     return jsonify({'success': True})
 
@@ -379,56 +535,92 @@ def save_response():
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO participant_response 
-            (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (programme_id, pen_number) 
-            DO UPDATE SET 
-                willingness = EXCLUDED.willingness,
-                attendance_days = EXCLUDED.attendance_days,
-                arrival_date = EXCLUDED.arrival_date,
-                arrival_time = EXCLUDED.arrival_time,
-                food_preference = EXCLUDED.food_preference,
-                remarks = EXCLUDED.remarks,
-                updated_at = CURRENT_TIMESTAMP
-        ''', (data['programme_id'], pen_number, data['willingness'], 
-              json.dumps(data.get('attendance_days', [])), data.get('arrival_date'), 
-              data.get('arrival_time'), data.get('food_preference'), data.get('remarks')))
+        if DATABASE_URL:
+            cursor.execute('''
+                INSERT INTO participant_response 
+                (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (programme_id, pen_number) 
+                DO UPDATE SET 
+                    willingness = EXCLUDED.willingness,
+                    attendance_days = EXCLUDED.attendance_days,
+                    arrival_date = EXCLUDED.arrival_date,
+                    arrival_time = EXCLUDED.arrival_time,
+                    food_preference = EXCLUDED.food_preference,
+                    remarks = EXCLUDED.remarks,
+                    updated_at = CURRENT_TIMESTAMP
+            ''', (data['programme_id'], pen_number, data['willingness'], 
+                  json.dumps(data.get('attendance_days', [])), data.get('arrival_date'), 
+                  data.get('arrival_time'), data.get('food_preference'), data.get('remarks')))
+        else:
+            cursor.execute('''
+                INSERT OR REPLACE INTO participant_response 
+                (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (data['programme_id'], pen_number, data['willingness'], 
+                  json.dumps(data.get('attendance_days', [])), data.get('arrival_date'), 
+                  data.get('arrival_time'), data.get('food_preference'), data.get('remarks')))
     
     return jsonify({'success': True})
 
-# Programme-wise Catering Report (Vegetarian & Non-Vegetarian only)
+# Programme-wise Catering Report
 @app.route('/api/programmes/<int:programme_id>/catering-report')
 @admin_login_required
 def catering_report(programme_id):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM programme WHERE id=%s', (programme_id,))
+        if DATABASE_URL:
+            cursor.execute('SELECT * FROM programme WHERE id=%s', (programme_id,))
+        else:
+            cursor.execute('SELECT * FROM programme WHERE id=?', (programme_id,))
         programme = cursor.fetchone()
         
-        cursor.execute('''
-            SELECT p.*, 
-                pr.willingness, pr.attendance_days, pr.food_preference,
-                pr.arrival_date, pr.arrival_time
-            FROM participant p
-            JOIN programme_participant pp ON p.pen_number = pp.pen_number
-            LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
-            WHERE pp.programme_id = %s
-        ''', (programme_id,))
+        if DATABASE_URL:
+            cursor.execute('''
+                SELECT p.*, 
+                    pr.willingness, pr.attendance_days, pr.food_preference,
+                    pr.arrival_date, pr.arrival_time
+                FROM participant p
+                JOIN programme_participant pp ON p.pen_number = pp.pen_number
+                LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
+                WHERE pp.programme_id = %s
+            ''', (programme_id,))
+        else:
+            cursor.execute('''
+                SELECT p.*, 
+                    pr.willingness, pr.attendance_days, pr.food_preference,
+                    pr.arrival_date, pr.arrival_time
+                FROM participant p
+                JOIN programme_participant pp ON p.pen_number = pp.pen_number
+                LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
+                WHERE pp.programme_id = ?
+            ''', (programme_id,))
         participants = cursor.fetchall()
         
-        cursor.execute('''
-            SELECT p.id, p.name, p.from_date, p.to_date, p.number_of_days,
-                   pp.pen_number, pr.food_preference, pr.willingness, pr.attendance_days
-            FROM programme p
-            JOIN programme_participant pp ON p.id = pp.programme_id
-            LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = pp.pen_number
-            WHERE p.id != %s 
-            AND p.from_date <= %s 
-            AND p.to_date >= %s
-            AND pr.willingness = 'Yes'
-        ''', (programme_id, programme['to_date'], programme['from_date']))
+        if DATABASE_URL:
+            cursor.execute('''
+                SELECT p.id, p.name, p.from_date, p.to_date, p.number_of_days,
+                       pp.pen_number, pr.food_preference, pr.willingness, pr.attendance_days
+                FROM programme p
+                JOIN programme_participant pp ON p.id = pp.programme_id
+                LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = pp.pen_number
+                WHERE p.id != %s 
+                AND p.from_date <= %s 
+                AND p.to_date >= %s
+                AND pr.willingness = 'Yes'
+            ''', (programme_id, programme['to_date'], programme['from_date']))
+        else:
+            cursor.execute('''
+                SELECT p.id, p.name, p.from_date, p.to_date, p.number_of_days,
+                       pp.pen_number, pr.food_preference, pr.willingness, pr.attendance_days
+                FROM programme p
+                JOIN programme_participant pp ON p.id = pp.programme_id
+                LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = pp.pen_number
+                WHERE p.id != ? 
+                AND p.from_date <= ? 
+                AND p.to_date >= ?
+                AND pr.willingness = 'Yes'
+            ''', (programme_id, programme['to_date'], programme['from_date']))
         overlapping_programmes = cursor.fetchall()
     
     participant_overlaps = {}
@@ -437,8 +629,8 @@ def catering_report(programme_id):
         if pen not in participant_overlaps:
             participant_overlaps[pen] = {'food_pref': overlap['food_preference'], 'dates': set()}
         
-        from_date = datetime.strptime(overlap['from_date'], '%Y-%m-%d')
-        to_date = datetime.strptime(overlap['to_date'], '%Y-%m-%d')
+        from_date = parse_date(overlap['from_date'])
+        to_date = parse_date(overlap['to_date'])
         attendance_days = json.loads(overlap['attendance_days']) if overlap['attendance_days'] else []
         
         current_date = from_date
@@ -448,8 +640,8 @@ def catering_report(programme_id):
                 participant_overlaps[pen]['dates'].add(date_str)
             current_date += timedelta(days=1)
     
-    from_date = datetime.strptime(programme['from_date'], '%Y-%m-%d')
-    to_date = datetime.strptime(programme['to_date'], '%Y-%m-%d')
+    from_date = parse_date(programme['from_date'])
+    to_date = parse_date(programme['to_date'])
     date_range = []
     current_date = from_date
     while current_date <= to_date:
@@ -603,7 +795,7 @@ def catering_report(programme_id):
             nonveg = daily_food[date][meal_name]['Non-Vegetarian']
             total_veg += veg
             total_nonveg += nonveg
-            html += f'<tr><td>{date}</td><td>Day {day_count}</td><td>{veg}</td><td>{nonveg}</td><td><strong>{veg+nonveg}</strong></td></tr>'
+            html += f'tr><td>{date}</td><td>Day {day_count}</td><td>{veg}</td><td>{nonveg}</td><td><strong>{veg+nonveg}</strong></td></tr>'
             day_count += 1
         html += f'<tr class="total-row"><td colspan="2"><strong>Total</strong></td><td><strong>{total_veg}</strong></td><td><strong>{total_nonveg}</strong></td><td><strong>{total_veg+total_nonveg}</strong></td></tr>'
         html += '</tbody></table></div>'
@@ -662,12 +854,17 @@ def date_wise_food_report():
     
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM programme WHERE from_date <= %s AND to_date >= %s ORDER BY from_date', (end_date, start_date))
+        if DATABASE_URL:
+            cursor.execute('SELECT * FROM programme WHERE from_date <= %s AND to_date >= %s ORDER BY from_date', (end_date, start_date))
+        else:
+            cursor.execute('SELECT * FROM programme WHERE from_date <= ? AND to_date >= ? ORDER BY from_date', (end_date, start_date))
         programmes = cursor.fetchall()
     
-    date_range = []
-    current_date = datetime.strptime(start_date, '%Y-%m-%d')
+    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
     end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+    
+    date_range = []
+    current_date = start_date_obj
     while current_date <= end_date_obj:
         date_range.append(current_date.strftime('%Y-%m-%d'))
         current_date += timedelta(days=1)
@@ -685,17 +882,26 @@ def date_wise_food_report():
     for programme in programmes:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference
-                FROM participant p
-                JOIN programme_participant pp ON p.pen_number = pp.pen_number
-                LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
-                WHERE pp.programme_id = %s AND pr.willingness = 'Yes'
-            ''', (programme['id'],))
+            if DATABASE_URL:
+                cursor.execute('''
+                    SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference
+                    FROM participant p
+                    JOIN programme_participant pp ON p.pen_number = pp.pen_number
+                    LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
+                    WHERE pp.programme_id = %s AND pr.willingness = 'Yes'
+                ''', (programme['id'],))
+            else:
+                cursor.execute('''
+                    SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference
+                    FROM participant p
+                    JOIN programme_participant pp ON p.pen_number = pp.pen_number
+                    LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
+                    WHERE pp.programme_id = ? AND pr.willingness = 'Yes'
+                ''', (programme['id'],))
             participants = cursor.fetchall()
         
-        prog_from = datetime.strptime(programme['from_date'], '%Y-%m-%d')
-        prog_to = datetime.strptime(programme['to_date'], '%Y-%m-%d')
+        prog_from = parse_date(programme['from_date'])
+        prog_to = parse_date(programme['to_date'])
         
         for date in date_range:
             date_obj = datetime.strptime(date, '%Y-%m-%d')
@@ -791,8 +997,10 @@ def date_wise_food_report():
             
             <h3>Daily Breakdown with Food Preferences</h3>
             <table>
-                <thead><tr><th>Date</th><th>Day</th><th colspan="2">🍳 Breakfast</th><th colspan="2">☕ Morning Tea</th><th colspan="2">🍲 Lunch</th><th colspan="2">🍪 Evening Tea</th><th colspan="2">🍽️ Dinner</th><th>Total</th></tr></thead>
-                <thead><tr><th></th><th></th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th></th></tr></thead>
+                <thead>
+                    <tr><th>Date</th><th>Day</th><th colspan="2">🍳 Breakfast</th><th colspan="2">☕ Morning Tea</th><th colspan="2">🍲 Lunch</th><th colspan="2">🍪 Evening Tea</th><th colspan="2">🍽️ Dinner</th><th>Total</th></tr>
+                    <tr><th></th><th></th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th></th></tr>
+                </thead>
                 <tbody>
     '''
     
@@ -811,12 +1019,24 @@ def date_wise_food_report():
         day_count += 1
     
     grand_total = total_veg + total_nonveg
-    html += f'</tbody><tfoot><tr style="background:#ecf0f1;font-weight:bold"><td colspan="2">Total</td>'
-    for meal in ['breakfast', 'morning_tea', 'lunch', 'evening_tea', 'dinner']:
-        html += f'<td>{total_by_meal[meal]["Vegetarian"]}</td><td>{total_by_meal[meal]["Non-Vegetarian"]}</td>'
-    html += f'<td><strong>{grand_total}</strong></td></tr></tfoot></table>'
-    html += f'<div class="grand-total"><strong>Total Food Items Required: {grand_total}</strong><br>🥬 Vegetarian: {total_veg} | 🍗 Non-Vegetarian: {total_nonveg}</div>'
-    html += '</div></body></html>'
+    html += f'''
+                </tbody>
+                <tfoot>
+                    <tr style="background:#ecf0f1;font-weight:bold">
+                        <td colspan="2">Total</td>
+                        {''.join([f'<td>{total_by_meal[meal]["Vegetarian"]}</td><td>{total_by_meal[meal]["Non-Vegetarian"]}</td>' for meal in ['breakfast', 'morning_tea', 'lunch', 'evening_tea', 'dinner']])}
+                        <td><strong>{grand_total}</strong></td>
+                    </tr>
+                </tfoot>
+            </table>
+            <div class="grand-total">
+                <strong>Total Food Items Required: {grand_total}</strong><br>
+                🥬 Vegetarian: {total_veg} | 🍗 Non-Vegetarian: {total_nonveg}
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
     
     return html
 
