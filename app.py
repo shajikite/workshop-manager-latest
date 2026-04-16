@@ -2,7 +2,7 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from functools import wraps
 from contextlib import contextmanager
 
@@ -13,12 +13,24 @@ app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-product
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 def parse_date(date_value):
-    """Parse date from either string or date object"""
+    """Parse date from either string or date object and return date object (not datetime)"""
+    if isinstance(date_value, str):
+        return datetime.strptime(date_value, '%Y-%m-%d').date()
+    elif isinstance(date_value, datetime):
+        return date_value.date()
+    elif isinstance(date_value, date):
+        return date_value
+    else:
+        return datetime.strptime(str(date_value), '%Y-%m-%d').date()
+
+def parse_datetime(date_value):
+    """Parse date from either string or date object and return datetime object"""
     if isinstance(date_value, str):
         return datetime.strptime(date_value, '%Y-%m-%d')
-    elif hasattr(date_value, 'strftime'):
-        # It's already a date/datetime object
+    elif isinstance(date_value, datetime):
         return date_value
+    elif isinstance(date_value, date):
+        return datetime.combine(date_value, datetime.min.time())
     else:
         return datetime.strptime(str(date_value), '%Y-%m-%d')
 
@@ -785,7 +797,9 @@ def catering_report(programme_id):
             <div class="meal-section">
                 <div class="meal-title">{meal_icon} {meal_name.title()}</div>
                 <table>
-                    <thead><tr><th>Date</th><th>Day</th><th>🥬 Veg</th><th>🍗 Non-Veg</th><th>Total</th></tr></thead>
+                    <thead>
+                        <tr><th>Date</th><th>Day</th><th>🥬 Veg</th><th>🍗 Non-Veg</th><th>Total</th></tr>
+                    </thead>
                     <tbody>
         '''
         day_count = 1
@@ -795,7 +809,7 @@ def catering_report(programme_id):
             nonveg = daily_food[date][meal_name]['Non-Vegetarian']
             total_veg += veg
             total_nonveg += nonveg
-            html += f'tr><td>{date}</td><td>Day {day_count}</td><td>{veg}</td><td>{nonveg}</td><td><strong>{veg+nonveg}</strong></td></tr>'
+            html += f'<tr><td>{date}</td><td>Day {day_count}</td><td>{veg}</td><td>{nonveg}</td><td><strong>{veg+nonveg}</strong></td></tr>'
             day_count += 1
         html += f'<tr class="total-row"><td colspan="2"><strong>Total</strong></td><td><strong>{total_veg}</strong></td><td><strong>{total_nonveg}</strong></td><td><strong>{total_veg+total_nonveg}</strong></td></tr>'
         html += '</tbody></table></div>'
@@ -860,8 +874,9 @@ def date_wise_food_report():
             cursor.execute('SELECT * FROM programme WHERE from_date <= ? AND to_date >= ? ORDER BY from_date', (end_date, start_date))
         programmes = cursor.fetchall()
     
-    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
-    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+    # Convert string dates to date objects for range
+    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
     
     date_range = []
     current_date = start_date_obj
@@ -900,11 +915,12 @@ def date_wise_food_report():
                 ''', (programme['id'],))
             participants = cursor.fetchall()
         
+        # Use parse_date to get date objects for comparison
         prog_from = parse_date(programme['from_date'])
         prog_to = parse_date(programme['to_date'])
         
         for date in date_range:
-            date_obj = datetime.strptime(date, '%Y-%m-%d')
+            date_obj = datetime.strptime(date, '%Y-%m-%d').date()
             if prog_from <= date_obj <= prog_to:
                 day_index = (date_obj - prog_from).days
                 is_first_day = (day_index == 0)
@@ -998,8 +1014,24 @@ def date_wise_food_report():
             <h3>Daily Breakdown with Food Preferences</h3>
             <table>
                 <thead>
-                    <tr><th>Date</th><th>Day</th><th colspan="2">🍳 Breakfast</th><th colspan="2">☕ Morning Tea</th><th colspan="2">🍲 Lunch</th><th colspan="2">🍪 Evening Tea</th><th colspan="2">🍽️ Dinner</th><th>Total</th></tr>
-                    <tr><th></th><th></th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th>🥬</th><th>🍗</th><th></th></tr>
+                    <tr>
+                        <th>Date</th><th>Day</th>
+                        <th colspan="2">🍳 Breakfast</th>
+                        <th colspan="2">☕ Morning Tea</th>
+                        <th colspan="2">🍲 Lunch</th>
+                        <th colspan="2">🍪 Evening Tea</th>
+                        <th colspan="2">🍽️ Dinner</th>
+                        <th>Total</th>
+                    </tr>
+                    <tr>
+                        <th></th><th></th>
+                        <th>🥬</th><th>🍗</th>
+                        <th>🥬</th><th>🍗</th>
+                        <th>🥬</th><th>🍗</th>
+                        <th>🥬</th><th>🍗</th>
+                        <th>🥬</th><th>🍗</th>
+                        <th></th>
+                    </tr>
                 </thead>
                 <tbody>
     '''
