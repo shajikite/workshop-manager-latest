@@ -54,10 +54,10 @@
                 <div class="dashboard-header">
                     <h1><i class="fas fa-tachometer-alt"></i> Admin Dashboard</h1>
                     <div class="tab-buttons">
-    <button class="tab-btn active" onclick="showAdminTab('programmes')"><i class="fas fa-chalkboard"></i> Programmes</button>
-    <button class="tab-btn" onclick="showAdminTab('participants')"><i class="fas fa-users"></i> Participants</button>
-    <button class="tab-btn" onclick="openDateWiseReport()"><i class="fas fa-calendar-week"></i> Date-wise Report</button>
-</div>
+                        <button class="tab-btn active" onclick="showAdminTab('programmes')"><i class="fas fa-chalkboard"></i> Programmes</button>
+                        <button class="tab-btn" onclick="showAdminTab('participants')"><i class="fas fa-users"></i> Participants</button>
+                        <button class="tab-btn" onclick="openDateWiseReport()"><i class="fas fa-calendar-week"></i> Date-wise Report</button>
+                    </div>
                 </div>
 
                 <!-- Programmes Tab -->
@@ -85,6 +85,7 @@
                 <div class="dashboard-header">
                     <h1><i class="fas fa-clipboard-list"></i> My Programmes</h1>
                     <p>Welcome, <strong id="welcomeName"></strong>! Please confirm your participation for each programme.</p>
+                    <p style="color: #e74c3c; font-size: 14px; margin-top: 10px;"><i class="fas fa-info-circle"></i> Note: Dates marked in red are disabled because you are already enrolled in another programme on those days.</p>
                 </div>
                 <div class="cards-grid" id="participantProgrammesList"></div>
             </div>
@@ -159,12 +160,10 @@
                 <input type="time" id="arrivalTime" class="modal-input">
                 
                 <label>Food Preference:</label>
-                // Replace the food preference select options with:
-<select id="foodPreference" class="modal-input">
-    <option value="Vegetarian">🥬 Vegetarian</option>
-    <option value="Non-Vegetarian">🍗 Non-Vegetarian</option>
-</select>
-                
+                <select id="foodPreference" class="modal-input">
+                    <option value="Vegetarian">🥬 Vegetarian</option>
+                    <option value="Non-Vegetarian">🍗 Non-Vegetarian</option>
+                </select>
                 
                 <label>Remarks:</label>
                 <textarea id="responseRemarks" class="modal-input" rows="2" placeholder="Any special requirements..."></textarea>
@@ -180,17 +179,17 @@
             <span class="close" onclick="closeProgrammeParticipantsModal()">&times;</span>
             <h2 id="ppProgName"></h2>
             <div class="action-bar">
-    <button onclick="printParticipantList()" class="btn-secondary"><i class="fas fa-print"></i> Print List</button>
-    <button onclick="generateCateringReport()" class="btn-secondary"><i class="fas fa-utensils"></i> Catering Report</button>
-    <button onclick="openEnrollModalForCurrent()" class="btn-primary"><i class="fas fa-user-plus"></i> Add Participants</button>
-</div>
+                <button onclick="printParticipantList()" class="btn-secondary"><i class="fas fa-print"></i> Print List</button>
+                <button onclick="generateCateringReport()" class="btn-secondary"><i class="fas fa-utensils"></i> Catering Report</button>
+                <button onclick="openEnrollModalForCurrent()" class="btn-primary"><i class="fas fa-user-plus"></i> Add Participants</button>
+            </div>
             <div class="table-container">
                 <table class="data-table">
                     <thead>
                         <tr>
                             <th>PEN</th><th>Name</th><th>Designation</th><th>District</th>
                             <th>Willingness</th><th>Attendance Days</th><th>Arrival</th>
-                            <th>Food</th><th>Remarks</th><th>Actions</th>
+                            <th>Food</th><th>Remarks</th><th>Status / Actions</th>
                         </tr>
                     </thead>
                     <tbody id="programmeParticipantsList"></tbody>

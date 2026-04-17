@@ -23,17 +23,6 @@ def parse_date(date_value):
     else:
         return datetime.strptime(str(date_value), '%Y-%m-%d').date()
 
-def parse_datetime(date_value):
-    """Parse date from either string or date object and return datetime object"""
-    if isinstance(date_value, str):
-        return datetime.strptime(date_value, '%Y-%m-%d')
-    elif isinstance(date_value, datetime):
-        return date_value
-    elif isinstance(date_value, date):
-        return datetime.combine(date_value, datetime.min.time())
-    else:
-        return datetime.strptime(str(date_value), '%Y-%m-%d')
-
 @contextmanager
 def get_db():
     """Get database connection - works with both SQLite and PostgreSQL"""
@@ -125,6 +114,11 @@ def init_db():
                     UNIQUE(programme_id, pen_number)
                 )
             ''')
+            # Add column for disabled days if not exists
+            cursor.execute('''
+                ALTER TABLE participant_response 
+                ADD COLUMN IF NOT EXISTS disabled_days TEXT
+            ''')
         else:
             # SQLite syntax
             cursor.execute('''
@@ -176,6 +170,7 @@ def init_db():
                     arrival_time TEXT,
                     food_preference TEXT,
                     remarks TEXT,
+                    disabled_days TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (programme_id) REFERENCES programme(id),
                     FOREIGN KEY (pen_number) REFERENCES participant(pen_number),
@@ -217,6 +212,52 @@ def participant_login_required(f):
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated_function
+
+# Helper function to check overlapping programmes for a participant
+def get_overlapping_dates(pen_number, programme_id, from_date, to_date):
+    """Get dates where participant is already enrolled in other programmes"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get all other programmes the participant is enrolled in
+        if DATABASE_URL:
+            cursor.execute('''
+                SELECT p.id, p.name, p.from_date, p.to_date
+                FROM programme p
+                JOIN programme_participant pp ON p.id = pp.programme_id
+                WHERE pp.pen_number = %s AND p.id != %s
+            ''', (pen_number, programme_id))
+        else:
+            cursor.execute('''
+                SELECT p.id, p.name, p.from_date, p.to_date
+                FROM programme p
+                JOIN programme_participant pp ON p.id = pp.programme_id
+                WHERE pp.pen_number = ? AND p.id != ?
+            ''', (pen_number, programme_id))
+        
+        other_programmes = cursor.fetchall()
+    
+    overlapping_dates = {}
+    new_prog_from = parse_date(from_date)
+    new_prog_to = parse_date(to_date)
+    
+    for prog in other_programmes:
+        prog_from = parse_date(prog['from_date'])
+        prog_to = parse_date(prog['to_date'])
+        
+        # Find overlapping date range
+        overlap_start = max(new_prog_from, prog_from)
+        overlap_end = min(new_prog_to, prog_to)
+        
+        if overlap_start <= overlap_end:
+            dates = []
+            current = overlap_start
+            while current <= overlap_end:
+                dates.append(current.strftime('%Y-%m-%d'))
+                current += timedelta(days=1)
+            overlapping_dates[prog['name']] = dates
+    
+    return overlapping_dates
 
 # Routes
 @app.route('/')
@@ -301,7 +342,7 @@ def get_programmes():
                     SELECT p.*, 
                         1 as is_enrolled,
                         pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
-                        pr.food_preference, pr.remarks
+                        pr.food_preference, pr.remarks, pr.disabled_days
                     FROM programme p
                     JOIN programme_participant pp ON p.id = pp.programme_id
                     LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = %s
@@ -313,7 +354,7 @@ def get_programmes():
                     SELECT p.*, 
                         1 as is_enrolled,
                         pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
-                        pr.food_preference, pr.remarks
+                        pr.food_preference, pr.remarks, pr.disabled_days
                     FROM programme p
                     JOIN programme_participant pp ON p.id = pp.programme_id
                     LEFT JOIN participant_response pr ON p.id = pr.programme_id AND pr.pen_number = ?
@@ -470,16 +511,52 @@ def delete_participant(pen_number):
     
     return jsonify({'success': True})
 
-# Enroll participants to programme
-@app.route('/api/programmes/<int:programme_id>/enroll', methods=['POST'])
+# Enroll participants to programme with overlap checking
+@app.route('/api/programmes/<int:programme_id>/check-overlaps', methods=['POST'])
 @admin_login_required
-def enroll_participants(programme_id):
+def check_programme_overlaps(programme_id):
+    """Check for overlapping dates before enrollment"""
     data = request.json
     pen_numbers = data.get('pen_numbers', [])
     
     with get_db() as conn:
         cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute('SELECT from_date, to_date FROM programme WHERE id=%s', (programme_id,))
+        else:
+            cursor.execute('SELECT from_date, to_date FROM programme WHERE id=?', (programme_id,))
+        programme = cursor.fetchone()
+    
+    if not programme:
+        return jsonify({'error': 'Programme not found'}), 404
+    
+    overlaps = {}
+    for pen in pen_numbers:
+        overlapping_dates = get_overlapping_dates(pen, programme_id, programme['from_date'], programme['to_date'])
+        if overlapping_dates:
+            overlaps[pen] = overlapping_dates
+    
+    return jsonify({'overlaps': overlaps})
+
+@app.route('/api/programmes/<int:programme_id>/enroll', methods=['POST'])
+@admin_login_required
+def enroll_participants(programme_id):
+    data = request.json
+    pen_numbers = data.get('pen_numbers', [])
+    confirmed_overlaps = data.get('confirmed_overlaps', {})
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get programme dates
+        if DATABASE_URL:
+            cursor.execute('SELECT from_date, to_date FROM programme WHERE id=%s', (programme_id,))
+        else:
+            cursor.execute('SELECT from_date, to_date FROM programme WHERE id=?', (programme_id,))
+        programme = cursor.fetchone()
+        
         for pen in pen_numbers:
+            # Enroll the participant
             if DATABASE_URL:
                 cursor.execute('''
                     INSERT INTO programme_participant (programme_id, pen_number) 
@@ -490,6 +567,28 @@ def enroll_participants(programme_id):
                     INSERT OR IGNORE INTO programme_participant (programme_id, pen_number) 
                     VALUES (?, ?)
                 ''', (programme_id, pen))
+            
+            # Calculate disabled days based on confirmed overlaps
+            disabled_days = []
+            if pen in confirmed_overlaps:
+                for programme_name, dates in confirmed_overlaps[pen].items():
+                    disabled_days.extend(dates)
+            disabled_days = list(set(disabled_days))  # Remove duplicates
+            
+            # Save disabled days to participant_response
+            if disabled_days:
+                if DATABASE_URL:
+                    cursor.execute('''
+                        INSERT INTO participant_response (programme_id, pen_number, disabled_days)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (programme_id, pen_number)
+                        DO UPDATE SET disabled_days = EXCLUDED.disabled_days
+                    ''', (programme_id, pen, json.dumps(disabled_days)))
+                else:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO participant_response (programme_id, pen_number, disabled_days)
+                        VALUES (?, ?, ?)
+                    ''', (programme_id, pen, json.dumps(disabled_days)))
     
     return jsonify({'success': True})
 
@@ -502,7 +601,7 @@ def get_programme_participants(programme_id):
             cursor.execute('''
                 SELECT p.*, 
                     pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
-                    pr.food_preference, pr.remarks, pr.updated_at as response_date
+                    pr.food_preference, pr.remarks, pr.updated_at as response_date, pr.disabled_days
                 FROM participant p
                 JOIN programme_participant pp ON p.pen_number = pp.pen_number
                 LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
@@ -513,7 +612,7 @@ def get_programme_participants(programme_id):
             cursor.execute('''
                 SELECT p.*, 
                     pr.willingness, pr.attendance_days, pr.arrival_date, pr.arrival_time,
-                    pr.food_preference, pr.remarks, pr.updated_at as response_date
+                    pr.food_preference, pr.remarks, pr.updated_at as response_date, pr.disabled_days
                 FROM participant p
                 JOIN programme_participant pp ON p.pen_number = pp.pen_number
                 LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
@@ -538,7 +637,7 @@ def remove_participant(programme_id, pen_number):
     
     return jsonify({'success': True})
 
-# Participant response
+# Participant response with disabled days
 @app.route('/api/participant/response', methods=['POST'])
 @participant_login_required
 def save_response():
@@ -547,11 +646,27 @@ def save_response():
     
     with get_db() as conn:
         cursor = conn.cursor()
+        
+        # Get disabled days for this programme
+        if DATABASE_URL:
+            cursor.execute('SELECT disabled_days FROM participant_response WHERE programme_id=%s AND pen_number=%s', 
+                          (data['programme_id'], pen_number))
+        else:
+            cursor.execute('SELECT disabled_days FROM participant_response WHERE programme_id=? AND pen_number=?', 
+                          (data['programme_id'], pen_number))
+        existing = cursor.fetchone()
+        
+        disabled_days = json.loads(existing['disabled_days']) if existing and existing['disabled_days'] else []
+        
+        # Filter out disabled days from attendance_days
+        attendance_days = data.get('attendance_days', [])
+        filtered_attendance_days = [day for day in attendance_days if day not in disabled_days]
+        
         if DATABASE_URL:
             cursor.execute('''
                 INSERT INTO participant_response 
-                (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks, disabled_days)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (programme_id, pen_number) 
                 DO UPDATE SET 
                     willingness = EXCLUDED.willingness,
@@ -560,22 +675,45 @@ def save_response():
                     arrival_time = EXCLUDED.arrival_time,
                     food_preference = EXCLUDED.food_preference,
                     remarks = EXCLUDED.remarks,
+                    disabled_days = EXCLUDED.disabled_days,
                     updated_at = CURRENT_TIMESTAMP
             ''', (data['programme_id'], pen_number, data['willingness'], 
-                  json.dumps(data.get('attendance_days', [])), data.get('arrival_date'), 
-                  data.get('arrival_time'), data.get('food_preference'), data.get('remarks')))
+                  json.dumps(filtered_attendance_days), data.get('arrival_date'), 
+                  data.get('arrival_time'), data.get('food_preference'), data.get('remarks'),
+                  json.dumps(disabled_days) if disabled_days else None))
         else:
             cursor.execute('''
                 INSERT OR REPLACE INTO participant_response 
-                (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (programme_id, pen_number, willingness, attendance_days, arrival_date, arrival_time, food_preference, remarks, disabled_days)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (data['programme_id'], pen_number, data['willingness'], 
-                  json.dumps(data.get('attendance_days', [])), data.get('arrival_date'), 
-                  data.get('arrival_time'), data.get('food_preference'), data.get('remarks')))
+                  json.dumps(filtered_attendance_days), data.get('arrival_date'), 
+                  data.get('arrival_time'), data.get('food_preference'), data.get('remarks'),
+                  json.dumps(disabled_days) if disabled_days else None))
     
     return jsonify({'success': True})
 
-# Programme-wise Catering Report
+@app.route('/api/participant/disabled-days/<int:programme_id>', methods=['GET'])
+@participant_login_required
+def get_disabled_days(programme_id):
+    """Get disabled days for a participant in a programme"""
+    pen_number = session['participant_pen']
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute('SELECT disabled_days FROM participant_response WHERE programme_id=%s AND pen_number=%s', 
+                          (programme_id, pen_number))
+        else:
+            cursor.execute('SELECT disabled_days FROM participant_response WHERE programme_id=? AND pen_number=?', 
+                          (programme_id, pen_number))
+        result = cursor.fetchone()
+    
+    disabled_days = json.loads(result['disabled_days']) if result and result['disabled_days'] else []
+    
+    return jsonify({'disabled_days': disabled_days})
+
+# Programme-wise Catering Report (Vegetarian & Non-Vegetarian only)
 @app.route('/api/programmes/<int:programme_id>/catering-report')
 @admin_login_required
 def catering_report(programme_id):
@@ -591,7 +729,7 @@ def catering_report(programme_id):
             cursor.execute('''
                 SELECT p.*, 
                     pr.willingness, pr.attendance_days, pr.food_preference,
-                    pr.arrival_date, pr.arrival_time
+                    pr.arrival_date, pr.arrival_time, pr.disabled_days
                 FROM participant p
                 JOIN programme_participant pp ON p.pen_number = pp.pen_number
                 LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
@@ -601,7 +739,7 @@ def catering_report(programme_id):
             cursor.execute('''
                 SELECT p.*, 
                     pr.willingness, pr.attendance_days, pr.food_preference,
-                    pr.arrival_date, pr.arrival_time
+                    pr.arrival_date, pr.arrival_time, pr.disabled_days
                 FROM participant p
                 JOIN programme_participant pp ON p.pen_number = pp.pen_number
                 LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
@@ -683,8 +821,13 @@ def catering_report(programme_id):
             pen = participant['pen_number']
             attendance_days = json.loads(participant['attendance_days']) if participant['attendance_days'] else []
             food_pref = participant['food_preference'] if participant['food_preference'] else 'Vegetarian'
+            disabled_days = json.loads(participant['disabled_days']) if participant['disabled_days'] else []
             
             for idx, date in enumerate(date_range):
+                # Skip disabled days
+                if date in disabled_days:
+                    continue
+                    
                 attends = not attendance_days or date in attendance_days
                 
                 if attends:
@@ -719,6 +862,7 @@ def catering_report(programme_id):
             if date in date_range:
                 duplicate_count += 1
     
+    # HTML generation (same as before, omitted for brevity - will be same as previous version)
     html = f'''
     <!DOCTYPE html>
     <html>
@@ -797,9 +941,7 @@ def catering_report(programme_id):
             <div class="meal-section">
                 <div class="meal-title">{meal_icon} {meal_name.title()}</div>
                 <table>
-                    <thead>
-                        <tr><th>Date</th><th>Day</th><th>🥬 Veg</th><th>🍗 Non-Veg</th><th>Total</th></tr>
-                    </thead>
+                    <thead><tr><th>Date</th><th>Day</th><th>🥬 Veg</th><th>🍗 Non-Veg</th><th>Total</th></tr></thead>
                     <tbody>
         '''
         day_count = 1
@@ -874,7 +1016,6 @@ def date_wise_food_report():
             cursor.execute('SELECT * FROM programme WHERE from_date <= ? AND to_date >= ? ORDER BY from_date', (end_date, start_date))
         programmes = cursor.fetchall()
     
-    # Convert string dates to date objects for range
     start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
     end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
     
@@ -899,7 +1040,7 @@ def date_wise_food_report():
             cursor = conn.cursor()
             if DATABASE_URL:
                 cursor.execute('''
-                    SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference
+                    SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference, pr.disabled_days
                     FROM participant p
                     JOIN programme_participant pp ON p.pen_number = pp.pen_number
                     LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
@@ -907,7 +1048,7 @@ def date_wise_food_report():
                 ''', (programme['id'],))
             else:
                 cursor.execute('''
-                    SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference
+                    SELECT p.*, pr.willingness, pr.attendance_days, pr.food_preference, pr.disabled_days
                     FROM participant p
                     JOIN programme_participant pp ON p.pen_number = pp.pen_number
                     LEFT JOIN participant_response pr ON pp.programme_id = pr.programme_id AND p.pen_number = pr.pen_number
@@ -915,7 +1056,6 @@ def date_wise_food_report():
                 ''', (programme['id'],))
             participants = cursor.fetchall()
         
-        # Use parse_date to get date objects for comparison
         prog_from = parse_date(programme['from_date'])
         prog_to = parse_date(programme['to_date'])
         
@@ -929,6 +1069,11 @@ def date_wise_food_report():
                 for participant in participants:
                     attendance_days = json.loads(participant['attendance_days']) if participant['attendance_days'] else []
                     food_pref = participant['food_preference'] if participant['food_preference'] else 'Vegetarian'
+                    disabled_days = json.loads(participant['disabled_days']) if participant['disabled_days'] else []
+                    
+                    # Skip if this date is disabled for this participant
+                    if date in disabled_days:
+                        continue
                     
                     if not attendance_days or date in attendance_days:
                         if not is_first_day:
@@ -1012,6 +1157,7 @@ def date_wise_food_report():
             </div>
             
             <h3>Daily Breakdown with Food Preferences</h3>
+            <div style="overflow-x: auto;">
             <table>
                 <thead>
                     <tr>
@@ -1061,6 +1207,7 @@ def date_wise_food_report():
                     </tr>
                 </tfoot>
             </table>
+            </div>
             <div class="grand-total">
                 <strong>Total Food Items Required: {grand_total}</strong><br>
                 🥬 Vegetarian: {total_veg} | 🍗 Non-Vegetarian: {total_nonveg}

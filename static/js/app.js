@@ -238,33 +238,34 @@ function closeParticipantModal() {
     document.getElementById('participantModal').style.display = 'none';
 }
 
-// Enrollment
+// Enrollment with overlap checking
 let currentEnrollProgrammeId = null;
 let currentEnrollProgrammeName = '';
 
-function openEnrollModal(programmeId, programmeName) {
+async function openEnrollModal(programmeId, programmeName) {
     currentEnrollProgrammeId = programmeId;
     currentEnrollProgrammeName = programmeName;
     document.getElementById('enrollProgName').innerText = programmeName;
     
-    fetch('/api/participants')
-        .then(res => res.json())
-        .then(participants => {
-            fetch(`/api/programmes/${programmeId}/participants`)
-                .then(res => res.json())
-                .then(enrolled => {
-                    const enrolledPens = new Set(enrolled.map(e => e.pen_number));
-                    const checklist = document.getElementById('participantsChecklist');
-                    checklist.innerHTML = participants.map(p => `
-                        <div class="checklist-item">
-                            <label>
-                                <input type="checkbox" value="${p.pen_number}" ${enrolledPens.has(p.pen_number) ? 'checked disabled' : ''}>
-                                <strong>${escapeHtml(p.name)}</strong> (${escapeHtml(p.pen_number)}) - ${escapeHtml(p.designation || '')}
-                            </label>
-                        </div>
-                    `).join('');
-                });
-        });
+    // Fetch all participants
+    const participantsRes = await fetch('/api/participants');
+    const allParticipantsList = await participantsRes.json();
+    
+    // Fetch currently enrolled participants for this programme
+    const enrolledRes = await fetch(`/api/programmes/${programmeId}/participants`);
+    const enrolled = await enrolledRes.json();
+    const enrolledPens = new Set(enrolled.map(e => e.pen_number));
+    
+    // Build checklist
+    const checklist = document.getElementById('participantsChecklist');
+    checklist.innerHTML = allParticipantsList.map(p => `
+        <div class="checklist-item" data-pen="${p.pen_number}" data-name="${escapeHtml(p.name)}">
+            <label>
+                <input type="checkbox" value="${p.pen_number}" ${enrolledPens.has(p.pen_number) ? 'checked disabled' : ''}>
+                <strong>${escapeHtml(p.name)}</strong> (${escapeHtml(p.pen_number)}) - ${escapeHtml(p.designation || '')}
+            </label>
+        </div>
+    `).join('');
     
     document.getElementById('enrollModal').style.display = 'block';
 }
@@ -278,14 +279,55 @@ async function saveEnrollment() {
         return;
     }
     
-    await fetch(`/api/programmes/${currentEnrollProgrammeId}/enroll`, {
+    // Check for overlaps
+    const overlapRes = await fetch(`/api/programmes/${currentEnrollProgrammeId}/check-overlaps`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pen_numbers })
     });
+    const overlapData = await overlapRes.json();
     
-    closeEnrollModal();
-    alert('Participants enrolled successfully');
+    // Build warning message
+    let warningMessage = '';
+    let confirmedOverlaps = {};
+    
+    for (const [pen, overlaps] of Object.entries(overlapData.overlaps || {})) {
+        const participantItem = document.querySelector(`.checklist-item[data-pen="${pen}"]`);
+        const participantName = participantItem ? participantItem.dataset.name : pen;
+        warningMessage += `\n\n📌 ${participantName} (${pen}):\n`;
+        for (const [progName, dates] of Object.entries(overlaps)) {
+            warningMessage += `   ⚠️ Already enrolled in "${progName}" on: ${dates.join(', ')}\n`;
+            confirmedOverlaps[pen] = confirmedOverlaps[pen] || {};
+            confirmedOverlaps[pen][progName] = dates;
+        }
+    }
+    
+    if (warningMessage) {
+        const confirmEnroll = confirm(`⚠️ OVERLAPPING PROGRAMME DATES DETECTED!\n\n${warningMessage}\n\n❌ These dates will be DISABLED for attendance selection in this programme.\n\n✅ Do you still want to enroll these participants?`);
+        if (!confirmEnroll) {
+            return;
+        }
+    }
+    
+    // Proceed with enrollment
+    const enrollRes = await fetch(`/api/programmes/${currentEnrollProgrammeId}/enroll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+            pen_numbers, 
+            confirmed_overlaps: confirmedOverlaps 
+        })
+    });
+    
+    if (enrollRes.ok) {
+        closeEnrollModal();
+        alert('✅ Participants enrolled successfully!\n\nNote: Overlapping dates have been disabled for attendance selection.');
+        if (currentViewProgrammeId) {
+            viewProgrammeParticipants(currentViewProgrammeId, currentViewProgrammeName);
+        }
+    } else {
+        alert('Error enrolling participants');
+    }
 }
 
 function closeEnrollModal() {
@@ -294,16 +336,20 @@ function closeEnrollModal() {
 
 // View programme participants
 let currentViewProgrammeId = null;
+let currentViewProgrammeName = '';
 
 async function viewProgrammeParticipants(programmeId, programmeName) {
     currentViewProgrammeId = programmeId;
+    currentViewProgrammeName = programmeName;
     document.getElementById('ppProgName').innerText = `Participants: ${programmeName}`;
     
     const res = await fetch(`/api/programmes/${programmeId}/participants`);
     const participants = await res.json();
     
     const tbody = document.getElementById('programmeParticipantsList');
-    tbody.innerHTML = participants.map(p => `
+    tbody.innerHTML = participants.map(p => {
+        const disabledDays = p.disabled_days ? JSON.parse(p.disabled_days) : [];
+        return `
         <tr>
             <td>${escapeHtml(p.pen_number)}</td>
             <td>${escapeHtml(p.name)}</td>
@@ -314,9 +360,12 @@ async function viewProgrammeParticipants(programmeId, programmeName) {
             <td>${p.arrival_date || '-'} ${p.arrival_time || ''}</td>
             <td>${p.food_preference || '-'}</td>
             <td>${escapeHtml(p.remarks || '-')}</td>
-            <td><button class="delete-btn" onclick="removeParticipantFromProgramme(${programmeId}, '${p.pen_number}')">Remove</button></td>
+            <td>
+                ${disabledDays.length > 0 ? `<span title="Disabled days: ${disabledDays.join(', ')}" style="color: #e74c3c; cursor: help;">⚠️ ${disabledDays.length} days disabled</span><br>` : ''}
+                <button class="delete-btn" onclick="removeParticipantFromProgramme(${programmeId}, '${p.pen_number}')">Remove</button>
+            </td>
         </tr>
-    `).join('');
+    `}).join('');
     
     document.getElementById('programmeParticipantsModal').style.display = 'block';
 }
@@ -324,7 +373,7 @@ async function viewProgrammeParticipants(programmeId, programmeName) {
 async function removeParticipantFromProgramme(programmeId, penNumber) {
     if (confirm('Remove this participant from the programme?')) {
         await fetch(`/api/programmes/${programmeId}/remove-participant/${penNumber}`, { method: 'DELETE' });
-        viewProgrammeParticipants(programmeId, document.getElementById('ppProgName').innerText.replace('Participants: ', ''));
+        viewProgrammeParticipants(programmeId, currentViewProgrammeName);
     }
 }
 
@@ -344,6 +393,9 @@ function printParticipantList() {
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
             th { background: #f0f0f0; }
             h1 { color: #333; }
+            @media print {
+                body { margin: 0; padding: 20px; }
+            }
         </style>
         </head><body>
         <h1>${programmeName}</h1>
@@ -355,12 +407,18 @@ function printParticipantList() {
     `);
 }
 
-function generateFoodReport() {
-    window.open(`/api/programmes/${currentViewProgrammeId}/food-report`, '_blank');
+function generateCateringReport() {
+    if (currentViewProgrammeId) {
+        window.open(`/api/programmes/${currentViewProgrammeId}/catering-report`, '_blank');
+    }
+}
+
+function openDateWiseReport() {
+    window.open('/api/date-wise-food-report', '_blank');
 }
 
 function openEnrollModalForCurrent() {
-    openEnrollModal(currentViewProgrammeId, document.getElementById('ppProgName').innerText.replace('Participants: ', ''));
+    openEnrollModal(currentViewProgrammeId, currentViewProgrammeName);
 }
 
 // Participant Dashboard
@@ -369,10 +427,13 @@ async function loadParticipantProgrammes() {
     const programmes = await res.json();
     const container = document.getElementById('participantProgrammesList');
     
-    container.innerHTML = programmes.map(p => `
+    container.innerHTML = programmes.map(p => {
+        const disabledDays = p.disabled_days ? JSON.parse(p.disabled_days) : [];
+        return `
         <div class="programme-card">
             ${p.is_enrolled ? '<div class="enrolled-badge"><i class="fas fa-check"></i> Enrolled</div>' : ''}
             ${p.willingness ? '<div class="response-badge"><i class="fas fa-reply"></i> Responded</div>' : ''}
+            ${disabledDays.length > 0 ? '<div class="response-badge" style="background: #e74c3c;"><i class="fas fa-exclamation-triangle"></i> ' + disabledDays.length + ' days disabled</div>' : ''}
             <h3>${escapeHtml(p.name)}</h3>
             <p>${escapeHtml(p.description || '')}</p>
             <div class="dates">📅 ${p.from_date} to ${p.to_date} (${p.number_of_days} days)</div>
@@ -384,12 +445,12 @@ async function loadParticipantProgrammes() {
                 </div>
             ` : '<div class="card-actions"><span style="color: #999;">Not enrolled yet</span></div>'}
         </div>
-    `).join('');
+    `}).join('');
 }
 
 let currentResponseProgramme = null;
 
-function openResponseModal(programmeId, programmeName, numDays, fromDate, programmeData) {
+async function openResponseModal(programmeId, programmeName, numDays, fromDate, programmeData) {
     currentResponseProgramme = { id: programmeId, numDays, fromDate };
     document.getElementById('responseProgName').innerText = `Confirm Participation: ${programmeName}`;
     document.getElementById('responseProgId').value = programmeId;
@@ -398,6 +459,11 @@ function openResponseModal(programmeId, programmeName, numDays, fromDate, progra
     document.getElementById('arrivalTime').value = programmeData.arrival_time || '';
     document.getElementById('foodPreference').value = programmeData.food_preference || 'Vegetarian';
     document.getElementById('responseRemarks').value = programmeData.remarks || '';
+    
+    // Fetch disabled days for this participant in this programme
+    const disabledRes = await fetch(`/api/participant/disabled-days/${programmeId}`);
+    const disabledData = await disabledRes.json();
+    const disabledDays = disabledData.disabled_days || [];
     
     // Generate attendance days checklist
     const days = [];
@@ -410,20 +476,39 @@ function openResponseModal(programmeId, programmeName, numDays, fromDate, progra
     
     const existingDays = programmeData.attendance_days ? JSON.parse(programmeData.attendance_days) : [];
     const checklistDiv = document.getElementById('attendanceDaysChecklist');
-    checklistDiv.innerHTML = days.map(day => `
-        <div class="checklist-item">
-            <label>
-                <input type="checkbox" value="${day}" ${existingDays.includes(day) ? 'checked' : ''}>
-                Day ${days.indexOf(day) + 1}: ${day}
-            </label>
-        </div>
-    `).join('');
+    
+    if (disabledDays.length > 0) {
+        checklistDiv.innerHTML += `<div style="background: #fff3cd; padding: 10px; margin-bottom: 15px; border-radius: 5px; border-left: 4px solid #ffc107;">
+            <strong>⚠️ Notice:</strong> You are already enrolled in other programmes on the following dates, so they cannot be selected:<br>
+            ${disabledDays.map(d => `📅 ${d}`).join(', ')}
+        </div>`;
+    }
+    
+    checklistDiv.innerHTML += days.map(day => {
+        const isDisabled = disabledDays.includes(day);
+        const isChecked = existingDays.includes(day);
+        return `
+            <div class="checklist-item" style="${isDisabled ? 'opacity: 0.5; background: #f5f5f5;' : ''}">
+                <label>
+                    <input type="checkbox" value="${day}" ${isChecked ? 'checked' : ''} ${isDisabled ? 'disabled' : ''}>
+                    Day ${days.indexOf(day) + 1}: ${day}
+                    ${isDisabled ? '<span style="color: #e74c3c; margin-left: 10px;"><i class="fas fa-ban"></i> (Already enrolled in another programme on this day)</span>' : ''}
+                </label>
+            </div>
+        `;
+    }).join('');
     
     // Show/hide attendance section based on willingness
-    document.getElementById('responseWillingness').addEventListener('change', function() {
-        document.getElementById('attendanceSection').style.display = this.value === 'Yes' ? 'block' : 'none';
-    });
-    document.getElementById('attendanceSection').style.display = programmeData.willingness === 'Yes' ? 'block' : 'none';
+    const attendanceSection = document.getElementById('attendanceSection');
+    const willingnessSelect = document.getElementById('responseWillingness');
+    
+    const toggleAttendanceSection = () => {
+        attendanceSection.style.display = willingnessSelect.value === 'Yes' ? 'block' : 'none';
+    };
+    
+    willingnessSelect.removeEventListener('change', toggleAttendanceSection);
+    willingnessSelect.addEventListener('change', toggleAttendanceSection);
+    toggleAttendanceSection();
     
     document.getElementById('responseModal').style.display = 'block';
 }
@@ -439,7 +524,7 @@ async function saveResponse() {
     
     const attendanceDays = [];
     if (willingness === 'Yes') {
-        const checkboxes = document.querySelectorAll('#attendanceDaysChecklist input:checked');
+        const checkboxes = document.querySelectorAll('#attendanceDaysChecklist input[type="checkbox"]:checked:not([disabled])');
         checkboxes.forEach(cb => attendanceDays.push(cb.value));
     }
     
@@ -468,6 +553,8 @@ async function saveResponse() {
 
 function closeResponseModal() {
     document.getElementById('responseModal').style.display = 'none';
+    // Clear the checklist div for next time
+    document.getElementById('attendanceDaysChecklist').innerHTML = '';
 }
 
 function showAdminTab(tab) {
@@ -479,25 +566,6 @@ function showAdminTab(tab) {
     if (tab === 'participants') loadParticipants();
 }
 
-
-
-
-
-function generateCateringReport() {
-    if (currentViewProgrammeId) {
-        window.open(`/api/programmes/${currentViewProgrammeId}/catering-report`, '_blank');
-    }
-}
-
-
-
-
-function openDateWiseReport() {
-    window.open('/api/date-wise-food-report', '_blank');
-}
-
-
-
 function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/[&<>]/g, function(m) {
@@ -508,4 +576,15 @@ function escapeHtml(str) {
     });
 }
 
+// Search functionality for enrollment modal
+document.getElementById('participantSearch')?.addEventListener('input', function(e) {
+    const searchTerm = e.target.value.toLowerCase();
+    const items = document.querySelectorAll('#participantsChecklist .checklist-item');
+    items.forEach(item => {
+        const text = item.textContent.toLowerCase();
+        item.style.display = text.includes(searchTerm) ? 'block' : 'none';
+    });
+});
+
+// Initialize
 checkAuth();
